@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>EV NOISE</title>
+<style>
+  :root{--bg:#0b0d12;--card:#161a24;--acc:#ff4d2e;--txt:#eef1f7;--mut:#8a93a8;--ok:#3bd47a}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,sans-serif;user-select:none;-webkit-user-select:none;overflow-x:hidden}
+  .wrap{max-width:1000px;margin:0 auto;padding:14px}
+  .top{display:flex;justify-content:space-between;align-items:center;color:var(--mut);font-size:14px;letter-spacing:.2em}
+  .dash{display:grid;grid-template-columns:1fr auto;align-items:center;gap:20px;margin:6px 0}
+  .speed{font-size:150px;font-weight:800;line-height:1;letter-spacing:-.04em}
+  .speed small{font-size:22px;color:var(--mut);font-weight:400;letter-spacing:0;margin-left:6px}
+  .gearbox{text-align:center;min-width:120px}
+  .gear{font-size:110px;font-weight:800;line-height:1}
+  .gear.cut{color:var(--acc)}
+  .gearbox span{display:block;font-size:12px;color:var(--mut);letter-spacing:.3em}
+  .rpm{height:22px;background:var(--card);border-radius:11px;overflow:hidden;position:relative;margin:4px 0 6px}
+  .rpm i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--ok),#ffd23b 60%,var(--acc) 92%)}
+  .rpm.lim i{filter:brightness(1.6)}
+  .meta{display:flex;justify-content:space-between;color:var(--mut);font-size:14px;margin-bottom:12px}
+  .meta b{color:var(--txt)}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+  .tile{background:var(--card);border:2px solid transparent;border-radius:12px;padding:12px;cursor:pointer;font-size:15px;font-weight:700;text-align:center}
+  .tile.on{border-color:var(--acc)}
+  .tile span{display:block;font-size:11px;color:var(--mut);font-weight:400;margin-top:2px}
+  .btns{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:8px}
+  button{font:inherit;font-size:17px;font-weight:700;padding:26px 6px;border:0;border-radius:14px;background:var(--card);color:var(--txt);cursor:pointer;touch-action:none}
+  button.acc{background:var(--acc)}button.on{background:var(--ok);color:#000}
+  button:active{filter:brightness(1.3)}
+  .row{display:flex;gap:12px;align-items:center;margin-top:12px;color:var(--mut);font-size:13px}
+  .row span{width:70px}
+  input[type=range]{flex:1;accent-color:var(--acc);height:30px}
+  #log{font-size:13px;color:var(--mut);margin-top:10px;min-height:18px}
+  @media(max-width:640px){.speed{font-size:96px}.gear{font-size:72px}.btns{grid-template-columns:1fr 1fr}button{padding:20px 8px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><span>EV NOISE</span><span id="gps">GPS OFF</span><span id="mode">—</span></div>
+  <div class="dash">
+    <div class="speed"><span id="spd">0</span><small>km/h</small></div>
+    <div class="gearbox"><div class="gear" id="gear">N</div><span>GEAR</span></div>
+  </div>
+  <div class="rpm" id="rpmbar"><i id="bar"></i></div>
+  <div class="meta"><span>RPM <b id="rpm">0</b></span><span>POWER <b id="pwr">0%</b></span><span id="state">READY</span></div>
+  <div class="grid" id="tiles"></div>
+  <div class="btns">
+    <button id="start" class="acc">START (GPS)</button>
+    <button id="eshift" class="on">E-SHIFT</button>
+    <button id="run100">SIM 0→100</button>
+    <button id="run260">SIM 0→260</button>
+    <button id="rev">HOLD THR</button>
+  </div>
+  <div class="row"><span>VOLUME</span><input type="range" id="vol" min="0" max="1" step="0.01" value="0.8"></div>
+  <div class="row"><span>DEPTH</span><input type="range" id="depth" min="0" max="1" step="0.01" value="0.5"></div>
+  <div id="log">Pick a sound, press START in the car (allow location). SIM / HOLD work anywhere.</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const log=m=>$('log').textContent=m;
+let ctx,master,wet,noiseBuf,eng=null,P=null;
+const now=()=>ctx.currentTime;
+const set=(p,v,t=.08)=>p.setTargetAtTime(v,now(),t);
+function osc(type,f){const o=ctx.createOscillator();o.type=type;o.frequency.value=f;o.start();return o}
+function noise(){const n=ctx.createBufferSource();n.buffer=noiseBuf;n.loop=true;n.start();return n}
+function gain(v){const g=ctx.createGain();g.gain.value=v;return g}
+function filt(type,f,q){const b=ctx.createBiquadFilter();b.type=type;b.frequency.value=f;b.Q.value=q;return b}
+function chain(...n){for(let i=0;i<n.length-1;i++)n[i].connect(n[i+1]);return n[n.length-1]}
+
+// ---------- sounds ----------
+const HARM={
+  pure:[[1,1],[2,.45],[3,.2],[4,.08],[5,.03],[6,.01]],
+  odd:[[1,1],[3,.35],[5,.15],[7,.06],[9,.02],[11,.01]],
+  warm:[[1,1],[2,.6],[3,.12],[4,.05],[5,.015],[6,.005]],
+};
+const PRESETS=[
+ {name:'Evolution',desc:'deep EV whine',harm:'pure',fMin:28,fMax:380,bright:.22,thrBright:.3,sub:.8,idle:.2,thrGain:.6,tex:.12,vib:.15,reverb:.3,thump:1},
+ {name:'Hollow',desc:'tram, very deep',harm:'odd',fMin:24,fMax:300,bright:.25,thrBright:.3,sub:.9,idle:.22,thrGain:.5,tex:.08,vib:.25,reverb:.4,thump:1.2},
+ {name:'Warm',desc:'round, soft',harm:'warm',fMin:32,fMax:420,bright:.2,thrBright:.25,sub:.7,idle:.2,thrGain:.55,tex:.1,vib:.1,reverb:.35,thump:.9},
+];
+
+function initAudio(){
+  if(ctx)return;
+  ctx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+  const len=ctx.sampleRate*2,b=ctx.createBuffer(1,len,ctx.sampleRate),d=b.getChannelData(0);
+  for(let i=0;i<len;i++)d[i]=Math.random()*2-1;noiseBuf=b;
+  const rl=ctx.sampleRate*2.2,ir=ctx.createBuffer(2,rl,ctx.sampleRate);
+  for(let c=0;c<2;c++){const x=ir.getChannelData(c);for(let i=0;i<rl;i++)x[i]=(Math.random()*2-1)*Math.pow(1-i/rl,3)}
+  const conv=ctx.createConvolver();conv.buffer=ir;
+  const rlp=filt('lowpass',1800,.7);
+  master=gain(1);wet=gain(.3);const out=gain(+$('vol').value),comp=ctx.createDynamicsCompressor();
+  master.connect(out);chain(master,rlp,conv,wet,out);out.connect(comp);comp.connect(ctx.destination);
+  master._out=out;
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)ctx.resume()});
+}
+function buildEngine(){
+  const parts=Array.from({length:6},()=>{const o=osc('sine',100),g=gain(0);o.connect(g);return{o,g}});
+  const lp=filt('lowpass',600,.7),g=gain(0);parts.forEach(p=>p.g.connect(lp));chain(lp,g,master);
+  const vib=osc('sine',5),vg=gain(0);chain(vib,vg);parts.forEach(p=>vg.connect(p.o.frequency));
+  const sub=osc('sine',30),sg=gain(0);chain(sub,sg,master);
+  const n=noise(),nf=filt('bandpass',400,4),ng=gain(0);chain(n,nf,ng,master);
+  const trem=osc('sine',6),tg=gain(0);chain(trem,tg,g.gain);
+  const th=osc('sine',60),thg=gain(0);chain(th,thg,master);
+  const wn=noise(),wf=filt('lowpass',250,1.2),wg=gain(0);chain(wn,wf,wg,master);
+  return{
+    update(s){
+      const H=HARM[P.harm],depth=+$('depth').value;
+      const f=(P.fMin+(P.fMax-P.fMin)*s.rn)*(1.25-depth*.5);
+      const loud=P.idle+s.rn*.35+s.thr*P.thrGain;
+      parts.forEach((p,i)=>{const[r,a]=H[i];set(p.o.frequency,f*r,.05);set(p.g.gain,a*(.55+s.thr*.45),.1)});
+      set(lp.frequency,150+P.bright*1400+s.thr*P.thrBright*1800+s.rn*500-s.regen*200,.1);
+      set(g.gain,Math.max(0,.2*loud-s.regen*.04)*(s.cut?.4:1),s.cut?.02:.1);
+      set(vg.gain,f*.02*P.vib);set(vib.frequency,4+s.thr*3);
+      set(sub.frequency,f/2,.05);set(sg.gain,P.sub*(.07+s.thr*.12)*(.6+depth*.8),.15);
+      set(nf.frequency,Math.min(1200,f*2.5),.05);set(ng.gain,P.tex*(s.thr*.1+s.rn*.02),.1);
+      set(tg.gain,s.regen*.06,.2);
+    },
+    thump(){const t=now(),k=P.thump;
+      th.frequency.cancelScheduledValues(t);th.frequency.setValueAtTime(110,t);th.frequency.exponentialRampToValueAtTime(45,t+.12);
+      thg.gain.cancelScheduledValues(t);thg.gain.setValueAtTime(0,t);thg.gain.linearRampToValueAtTime(.35*k,t+.008);thg.gain.exponentialRampToValueAtTime(.001,t+.22);
+      wg.gain.cancelScheduledValues(t);wg.gain.setValueAtTime(0,t);wg.gain.linearRampToValueAtTime(.25*k,t+.015);wg.gain.exponentialRampToValueAtTime(.001,t+.18)},
+    stop(){[...parts.map(p=>p.o),vib,sub,n,trem,th,wn].forEach(o=>o.stop())}
+  };
+}
+
+// ---------- vehicle model ----------
+// gears[] = km/h at redline in each gear → 1: 0-60, 2: 60-90, 3: 90-120, 4: -152, 5: -188, 6: -225, 7: -260
+const CAR={idle:900,redline:8000,vmax:260,gears:[60,90,120,152,188,225,260]};
+const S={speed:0,target:0,thr:0,thrEff:0,regen:0,rpm:900,gear:0,mode:'idle',rev:false,eshift:true,
+         runStart:0,runGoal:100,shiftT:0,blipT:0,limT:0,lastFixT:0,fixSpeed:0,fixAccel:0};
+let lastT=performance.now();
+
+function tick(t){
+  const dt=Math.min(.1,(t-lastT)/1000);lastT=t;
+  if(S.mode==='gps'){
+    const age=(t-S.lastFixT)/1000;
+    S.target=age<2.5?Math.max(0,S.fixSpeed+S.fixAccel*3.6*age):S.target;
+    S.speed+=(S.target-S.speed)*Math.min(1,dt*4);
+    const a=age<3?S.fixAccel:0;
+    S.thr+=(Math.max(0,Math.min(1,(a-.25)/2.2))-S.thr)*Math.min(1,dt*4);
+    S.regen+=(Math.max(0,Math.min(1,(-a-.4)/2.5))-S.regen)*Math.min(1,dt*3);
+    if(S.speed<2&&!S.rev)S.thr+=(0-S.thr)*Math.min(1,dt*4);
+  }else{
+    if(S.mode==='run'&&S.speed>=S.runGoal-.5){S.mode='coast';S.target=0;log(`0→${S.runGoal} in ${((t-S.runStart)/1000).toFixed(2)}s`)}
+    const d=S.target-S.speed;
+    const rate=d>0?Math.max(4,27*(1-S.speed/330)):16;   // accel fades with speed like a real EV
+    S.speed+=Math.sign(d)*Math.min(Math.abs(d),rate*dt);
+    const accel=S.target>S.speed+.5?1:0,decel=S.speed>3&&S.target<S.speed-.5?1:0;
+    S.thr+=(accel-S.thr)*Math.min(1,dt*5);S.regen+=(decel-S.regen)*Math.min(1,dt*3);
+  }
+  if(S.rev){S.thr+=(1-S.thr)*Math.min(1,dt*8);S.regen=0}
+  const k=Math.min(1,S.speed/CAR.vmax);
+
+  let tr;
+  if(!S.eshift){S.gear=0;tr=CAR.idle+k*(CAR.redline-CAR.idle)}
+  else{
+    const g=CAR.gears,ratio=i=>CAR.redline/g[i];
+    if(S.speed<3)S.gear=0;
+    else{const r=S.speed*ratio(S.gear),upAt=S.thr>.35?.95:.85;
+      if(r>CAR.redline*upAt&&S.gear<g.length-1){S.gear++;S.shiftT=.13;eng&&eng.thump()}
+      else if(r<CAR.redline*.45&&S.gear>0){S.gear--;S.shiftT=.05;if(S.regen>.25)S.blipT=.16;eng&&eng.thump()}}
+    tr=Math.max(CAR.idle,S.speed*ratio(S.gear));
+    if(S.speed<10&&S.thr>.3)tr=Math.max(tr,CAR.idle+S.thr*3200);
+    if(S.rev&&S.speed<3)tr=CAR.redline*1.03;
+  }
+  if(S.shiftT>0)S.shiftT-=dt;if(S.blipT>0)S.blipT-=dt;
+  if(S.rpm>=CAR.redline)S.limT=.06;
+  if(S.limT>0){S.limT-=dt;tr=Math.min(tr,CAR.redline*.92)}
+  const cut=S.shiftT>0||S.limT>0;
+  S.thrEff=cut?0:Math.max(S.thr,S.blipT>0?.7:0);
+  const slew=(tr>S.rpm?(6000+S.thrEff*6000):5000)*dt;
+  S.rpm+=Math.sign(tr-S.rpm)*Math.min(Math.abs(tr-S.rpm),slew);
+  const rn=Math.min(1,Math.max(0,(S.rpm-CAR.idle)/(CAR.redline-CAR.idle)));
+
+  if(eng)eng.update({rn,thr:S.thrEff,regen:S.regen,cut});
+  $('spd').textContent=Math.round(S.speed);$('rpm').textContent=Math.round(S.rpm/10)*10;
+  $('pwr').textContent=Math.round(S.thrEff*100)+'%';$('bar').style.width=(rn*100)+'%';
+  $('rpmbar').classList.toggle('lim',S.limT>0);
+  const ge=$('gear');ge.textContent=S.eshift?(S.speed<3&&!S.rev?'N':S.gear+1):'D';ge.classList.toggle('cut',cut);
+  $('state').textContent=S.regen>.4?'REGEN':S.thrEff>.4?'POWER':S.speed>2?'CRUISE':'IDLE';
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// ---------- UI ----------
+PRESETS.forEach((p,i)=>{const d=document.createElement('div');d.className='tile';d.innerHTML=`${p.name}<span>${p.desc}</span>`;d.onclick=()=>select(i);$('tiles').appendChild(d)});
+function select(i){initAudio();ctx.resume();P=PRESETS[i];if(!eng)eng=buildEngine();set(wet.gain,P.reverb);
+  [...$('tiles').children].forEach((t,j)=>t.classList.toggle('on',j===i));log(P.name+' loaded')}
+function ensure(){if(!eng)select(0);else ctx.resume()}
+$('vol').oninput=e=>{if(ctx)set(master._out.gain,+e.target.value)};
+$('eshift').onclick=()=>{S.eshift=!S.eshift;$('eshift').classList.toggle('on',S.eshift);log('E-SHIFT '+(S.eshift?'on':'off'))};
+const rev=$('rev');
+const down=e=>{e.preventDefault();ensure();S.rev=true;rev.classList.add('on')};
+const up=()=>{S.rev=false;rev.classList.remove('on')};
+rev.addEventListener('pointerdown',down);['pointerup','pointercancel','pointerleave'].forEach(ev=>rev.addEventListener(ev,up));
+addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat&&e.target.tagName!=='INPUT'){e.preventDefault();down(e)}});
+addEventListener('keyup',e=>{if(e.code==='Space')up()});
+function sim(goal){ensure();if(S.mode==='gps')return log('stop GPS first (press START)');S.speed=0;S.target=goal;S.runGoal=goal;S.mode='run';S.runStart=performance.now();log(`launching 0→${goal}…`)}
+$('run100').onclick=()=>sim(100);
+$('run260').onclick=()=>sim(260);
+
+// ---------- GPS ----------
+let watchId=null,last=null,wake=null,fixes=0;
+function hav(a,b){const R=6371000,r=x=>x*Math.PI/180,dl=r(b.latitude-a.latitude),dn=r(b.longitude-a.longitude);
+  const h=Math.sin(dl/2)**2+Math.cos(r(a.latitude))*Math.cos(r(b.latitude))*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(h))}
+async function wakeLock(){try{wake=await navigator.wakeLock.request('screen');document.addEventListener('visibilitychange',()=>{if(!document.hidden&&wake)navigator.wakeLock.request('screen').then(w=>wake=w).catch(()=>{})})}catch(e){}}
+$('start').onclick=()=>{
+  ensure();
+  if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;last=null;S.mode='idle';S.target=0;S.fixSpeed=0;S.fixAccel=0;
+    $('gps').textContent='GPS OFF';$('start').classList.remove('on');$('start').textContent='START (GPS)';log('GPS stopped');return}
+  if(!navigator.geolocation)return log('no geolocation in this browser');
+  if(!isSecureContext)log('warning: GPS needs https');
+  wakeLock();
+  watchId=navigator.geolocation.watchPosition(p=>{
+    const c=p.coords;if(c.accuracy>60){$('gps').textContent=`GPS ±${Math.round(c.accuracy)}m (weak)`;return}
+    let v=c.speed;
+    if((v==null||isNaN(v))&&last){const dt=(p.timestamp-last.timestamp)/1000;v=dt>0?hav(last.coords,c)/dt:0}
+    v=Math.max(0,v||0);if(v<.4)v=0;
+    if(last){const dt=(p.timestamp-last.timestamp)/1000;if(dt>.2&&dt<4){const a=(v-S.fixSpeed/3.6)/dt;S.fixAccel+=(a-S.fixAccel)*.6}}
+    S.fixSpeed=v*3.6;S.lastFixT=performance.now();S.mode='gps';last=p;fixes++;
+    $('gps').textContent=`GPS ±${Math.round(c.accuracy)}m · ${fixes}`;
+  },e=>log('GPS error: '+e.message+(e.code===1?' — allow location in browser':'')),{enableHighAccuracy:true,maximumAge:0,timeout:15000});
+  $('start').classList.add('on');$('start').textContent='STOP GPS';$('mode').textContent='DRIVE';log('GPS on — waiting for fix…');
+};
+</script>
+</body>
+</html>
